@@ -60,10 +60,17 @@ OPENCV_THREADS = _env("FREND_OPENCV_THREADS", 3, int)
 # An object must be seen in this many consecutive detector passes before it is
 # announced. Filters out single-frame false positives ("flicker").
 HAZARD_CONFIRM_FRAMES = 2
-# Seconds before the same object/position/proximity is announced again.
-HAZARD_REPEAT_SECONDS = _env("FREND_HAZARD_REPEAT_SECONDS", 8.0, float)
-# "Very close" hazards are repeated more often because they matter most.
-HAZARD_URGENT_REPEAT_SECONDS = 3.0
+# Gap in sightings (s) still counted as "the same continuous sighting", so one
+# missed frame doesn't restart the confirmation count.
+HAZARD_DROPOUT_SECONDS = 0.6
+# An object unseen for this long is forgotten; if it comes back, it is
+# announced again as new.
+HAZARD_FORGET_SECONDS = _env("FREND_HAZARD_FORGET_SECONDS", 3.0, float)
+# Re-announce an already-announced object as "getting closer" once its box has
+# grown by this factor (it is approaching without changing distance level).
+HAZARD_APPROACH_GROWTH = 1.6
+# Minimum confidence for an alert (memory uses detector.TRUSTED_CONFIDENCE).
+HAZARD_MIN_CONFIDENCE = _env("FREND_HAZARD_MIN_CONFIDENCE", 0.50, float)
 # Minimum gap between any two hazard announcements, so alerts don't pile up.
 HAZARD_MIN_GAP_SECONDS = 1.5
 # A "very close" alert jumps the speech queue, so it needs more evidence:

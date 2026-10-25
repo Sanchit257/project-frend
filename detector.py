@@ -250,84 +250,100 @@ def _proximity(x1, y1, x2, y2, frame_w, frame_h):
     return 0
 
 
-class HazardAnnouncer:
-    """Decides which detections deserve a spoken alert, and when."""
+def _alert_confident(det):
+    """Alerts accept slightly weaker sightings than memory does: the frame
+    confirmation below already filters one-off false positives."""
+    need = (SUSPICIOUS_CLASSES_CONFIDENCE if det.label in SUSPICIOUS_CLASSES
+            else config.HAZARD_MIN_CONFIDENCE)
+    return det.confidence >= need
+
+
+def _area(det):
+    x1, y1, x2, y2 = det.box
+    return max(1, (x2 - x1) * (y2 - y1))
+
+
+class _Track:
+    __slots__ = ("hits", "urgent_hits", "last_seen", "said_proximity", "said_area")
 
     def __init__(self):
-        self._streak = {}          # key -> consecutive frames seen
-        self._urgent_streak = {}   # key -> consecutive confident very-close frames
-        self._last_said = {}       # (key, proximity) -> timestamp
-        self._last_any = 0.0
+        self.hits = 0
+        self.urgent_hits = 0
+        self.last_seen = 0.0
+        self.said_proximity = None    # None = not announced yet
+        self.said_area = 0
+
+
+class HazardAnnouncer:
+    """Event-based alerts: each object is announced once when it first shows
+    up close, and again only when it gets closer (a nearer distance level, or
+    clearly bigger in view). Nothing is repeated just because time passed; an
+    object that leaves the view for HAZARD_FORGET_SECONDS counts as new when
+    it comes back."""
+
+    def __init__(self):
+        self._tracks = {}          # Detection.key -> _Track
+        self._last_any = float("-inf")
 
     def update(self, detections, now=None, camera_moving=False):
         """Feed one frame's detections. Returns (text, urgent) or None."""
-        now = now or time.monotonic()
-
+        now = time.monotonic() if now is None else now
+        self._tracks = {k: t for k, t in self._tracks.items()
+                        if now - t.last_seen < config.HAZARD_FORGET_SECONDS}
         if camera_moving:
-            # Smeared frames produce phantom objects; start counting again
-            # once the view is steady.
-            self._streak.clear()
-            self._urgent_streak.clear()
+            # Smeared frames produce phantom objects: skip them, but keep the
+            # tracks so walking jitter doesn't make objects "new" again.
             return None
 
-        # Keep only hazard-relevant objects that are near enough to matter.
         relevant = [d for d in detections
-                    if d.label in HAZARD_WEIGHTS and is_trusted(d)
+                    if d.label in HAZARD_WEIGHTS and _alert_confident(d)
                     and (d.proximity > 0 or d.label in FAR_ALERT_CLASSES)]
 
-        # Track how many frames in a row each object has been visible.
-        seen = {d.key for d in relevant}
-        self._streak = {k: self._streak.get(k, 0) + 1 for k in seen}
-        very_close = {d.key for d in relevant if d.proximity == 2
-                      and d.confidence >= config.HAZARD_URGENT_MIN_CONFIDENCE}
-        self._urgent_streak = {k: self._urgent_streak.get(k, 0) + 1 for k in very_close}
-
-        # Only well-established objects count as "very close". A confident
-        # one is held back until it has been seen long enough (announcing it
-        # as "close" first would delay the real warning by the minimum gap);
-        # a low-confidence one is announced as plain "close".
-        held = []
+        candidates = []
         for d in relevant:
-            if d.proximity < 2:
-                held.append(d)
-            elif d.key not in very_close:
-                held.append(replace(d, proximity=1))
-            elif self._urgent_streak[d.key] >= config.HAZARD_URGENT_CONFIRM_FRAMES:
-                held.append(d)
-        relevant = held
-        confirmed = [d for d in relevant
-                     if self._streak[d.key] >= config.HAZARD_CONFIRM_FRAMES]
-        if not confirmed:
-            return None
-        if now - self._last_any < config.HAZARD_MIN_GAP_SECONDS:
+            t = self._tracks.get(d.key)
+            if t is None:
+                t = self._tracks[d.key] = _Track()
+            # A short dropout (one missed frame) doesn't restart the count.
+            if now - t.last_seen > config.HAZARD_DROPOUT_SECONDS:
+                t.hits = t.urgent_hits = 0
+            t.last_seen = now
+            t.hits += 1
+            confident_close = (d.proximity == 2
+                               and d.confidence >= config.HAZARD_URGENT_MIN_CONFIDENCE)
+            t.urgent_hits = t.urgent_hits + 1 if confident_close else 0
+
+            # "Very close" jumps ahead of everything, so it needs more evidence;
+            # until then (or if weak) the object counts as plain "close".
+            if d.proximity == 2 and t.urgent_hits < config.HAZARD_URGENT_CONFIRM_FRAMES:
+                d = replace(d, proximity=1)
+            if t.hits < config.HAZARD_CONFIRM_FRAMES:
+                continue
+
+            if t.said_proximity is None or d.proximity > t.said_proximity:
+                candidates.append((d, t, False))
+            elif (d.proximity >= 1
+                  and _area(d) >= t.said_area * config.HAZARD_APPROACH_GROWTH):
+                candidates.append((d, t, True))
+
+        if not candidates or now - self._last_any < config.HAZARD_MIN_GAP_SECONDS:
             return None
 
         # Most important first: closest, then most dangerous, then centred.
-        confirmed.sort(key=lambda d: (d.proximity, HAZARD_WEIGHTS[d.label],
-                                      d.position == "ahead"), reverse=True)
-
-        for det in confirmed:
-            repeat = (config.HAZARD_URGENT_REPEAT_SECONDS if det.proximity == 2
-                      else config.HAZARD_REPEAT_SECONDS)
-            memo = (det.key, det.proximity)
-            if now - self._last_said.get(memo, -1e9) < repeat:
-                continue       # said recently; maybe the next one is new
-            self._last_said[memo] = now
-            self._last_any = now
-            self._forget_old(now)
-            return describe_detection(det), det.proximity == 2
-        return None
-
-    def _forget_old(self, now):
-        horizon = 4 * config.HAZARD_REPEAT_SECONDS
-        self._last_said = {k: t for k, t in self._last_said.items()
-                           if now - t < horizon}
+        d, t, approaching = max(candidates, key=lambda c: (
+            c[0].proximity, HAZARD_WEIGHTS[c[0].label], c[0].position == "ahead"))
+        t.said_proximity = d.proximity
+        t.said_area = _area(d)
+        self._last_any = now
+        return describe_detection(d, approaching), d.proximity == 2
 
 
-def describe_detection(det):
+def describe_detection(det, approaching=False):
     """'Car on your left, close' style phrase. Kept short so it's spoken fast."""
     name = SPOKEN_NAMES.get(det.label, det.label)
     where = "ahead" if det.position == "ahead" else f"on your {det.position}"
+    if approaching:
+        return f"{name.capitalize()} {where}, getting closer"
     if det.proximity == 2:
         return f"Careful, {name} {where}, very close"
     if det.proximity == 1:
