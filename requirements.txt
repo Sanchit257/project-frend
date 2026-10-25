@@ -1,0 +1,39 @@
+# Project Frend - Python dependencies
+# Install inside the venv:   venv/bin/pip install -r requirements.txt
+#
+# System packages (install once with apt):
+#   sudo apt install espeak-ng ffmpeg
+#     espeak-ng    -> offline voice used by pyttsx3 (last-resort fallback)
+#     ffmpeg       -> provides ffplay, which plays gTTS mp3s to the AirPods
+#   pw-cat / pw-record (Cartesia playback and mic capture, including the
+#   AirPods mic) ship with PipeWire, which Raspberry Pi OS already uses.
+#   For the AirPods mic, also run once:  sudo ./setup_airpods_mic.sh
+#
+# Not used on purpose:
+#   pyaudio / sounddevice - PortAudio only sees the Pi's raw ALSA devices,
+#               not the Bluetooth (AirPods) speaker and mic that PipeWire manages.
+#   runpod    - that SDK is for writing workers that run *on* Runpod. The
+#               glasses only call the endpoint's HTTP API, so `requests` is
+#               enough and keeps the install small.
+
+# Computer vision + on-device hazard detection (OpenCV DNN runs NanoDet ONNX)
+opencv-python>=4.10
+numpy>=1.26
+
+# Text-to-speech: Cartesia Sonic streaming over WebSocket, with fallbacks
+cartesia[websockets]>=4.2
+gTTS>=2.5
+pyttsx3>=2.98
+
+# Claude scene descriptions
+anthropic>=0.40
+python-dotenv>=1.0
+
+# Detailed scans on the Runpod GPU (OpenAI-compatible HTTP API)
+requests>=2.31
+
+# Visual memory (Elastic Cloud Serverless is version 9.x)
+elasticsearch>=9.0,<10
+
+# Offline "Hey Frend" voice commands
+vosk>=0.3.45
